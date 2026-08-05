@@ -56,12 +56,21 @@ final class AudioRecorder {
     private var startDiagnosticsLastPhase: String?
     private var startDiagnosticsTimedOutGeneration: UInt64?
 
-    /// Engines cancelled while AVFAudio is still initializing are retained instead
-    /// of being deallocated immediately. On current macOS builds, tearing down a
-    /// half-built AVAudioEngine can block forever inside AVAudioIOUnit's serial
-    /// queue during Bluetooth route churn.
-    private static var quarantinedEngines: [AVAudioEngine] = []
-    private static let quarantinedEnginesLock = NSLock()
+    /// Engines cancelled while AVFAudio is still initializing must not be
+    /// deallocated synchronously. On current macOS builds, doing so can block inside
+    /// AVAudioIOUnit during Bluetooth route churn. They also cannot be retained
+    /// forever: an installed tap keeps the audio file and CoreAudio property listeners
+    /// alive, and a stale listener can spin continuously while the app is idle.
+    ///
+    /// Give AVFAudio a moment to settle, then tear each engine down on a concurrent
+    /// utility queue. Concurrent cleanup prevents one wedged engine from blocking
+    /// cleanup of all later cancellations.
+    private static let quarantinedEngineCleanupDelay: TimeInterval = 2.0
+    private static let quarantinedEngineCleanupQueue = DispatchQueue(
+        label: "com.swair.hearsay.audioengine-cleanup",
+        qos: .utility,
+        attributes: .concurrent
+    )
 
     init() {}
 
@@ -365,10 +374,28 @@ final class AudioRecorder {
     }
 
     private func quarantineEngine(_ engine: AVAudioEngine, reason: String) {
-        print("AudioRecorder: Quarantining AVAudioEngine (\(reason))")
-        Self.quarantinedEnginesLock.lock()
-        Self.quarantinedEngines.append(engine)
-        Self.quarantinedEnginesLock.unlock()
+        print("AudioRecorder: Scheduling delayed AVAudioEngine cleanup (\(reason))")
+        DiagnosticLog.shared.event("audio.engine_cleanup_scheduled", level: .warning, fields: [
+            "delay_seconds": String(format: "%.2f", Self.quarantinedEngineCleanupDelay),
+            "reason": reason
+        ])
+
+        Self.quarantinedEngineCleanupQueue.asyncAfter(
+            deadline: .now() + Self.quarantinedEngineCleanupDelay
+        ) {
+            DiagnosticLog.shared.event("audio.engine_cleanup_begin", fields: ["reason": reason])
+
+            // Stop first so the tap cannot receive more buffers, then detach the tap
+            // to release its AVAudioFile closure and CoreAudio format listeners.
+            // This may block for a broken device route, which is why each cleanup runs
+            // independently on the concurrent utility queue rather than main/audioQueue.
+            engine.stop()
+            engine.inputNode.removeTap(onBus: 0)
+            engine.reset()
+
+            DiagnosticLog.shared.event("audio.engine_cleanup_end", fields: ["reason": reason])
+            print("AudioRecorder: Finished delayed AVAudioEngine cleanup (\(reason))")
+        }
     }
 
     private func beginStartDiagnostics(generation: UInt64) {
