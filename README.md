@@ -32,9 +32,9 @@ Every transcription is saved locally in **History** — find recent ones in the 
 1. Grant **Microphone** permission when prompted
 2. Grant **Accessibility** permission (System Settings → Privacy & Security → Accessibility)
 3. Pick a speech model to download:
-   - **Qwen** — fast, high-quality, works on all Macs (recommended)
+   - **Parakeet** — English and multilingual, Apple Silicon (recommended)
+   - **Qwen** — fast and high-quality, works on all Macs including Intel
    - **Whisper** — English transcription (Apple Silicon)
-   - **Parakeet** — English and multilingual (Apple Silicon)
 
 You can download, switch between, and delete models anytime in **Settings → Models**. Shortcuts, cleanup rules, and more are configurable in Settings too.
 
