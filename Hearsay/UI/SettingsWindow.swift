@@ -27,7 +27,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// Returns true while a transcription is running; used to block model deletion.
     var isTranscriptionInProgress: (() -> Bool)?
     
-    private let tabView = NSTabView()
+    /// Sidebar navigation + a container that swaps in one pane at a time
+    /// (replaces the old top-tab `NSTabView`).
+    private let sidebarStack = NSStackView()
+    private let detailContainer = AdaptiveBackgroundView(color: .windowBackgroundColor)
+    private var sidebarItems: [SidebarItemView] = []
+    private var panes: [String: NSView] = [:]
+    private var currentPaneID: String?
+    private var sidebarFooter: SidebarFooterView!
+
     private var settingsTab: SettingsTabView!
     private var historyTab: HistoryTabView!
     private var permissionsTab: PermissionsTabView!
@@ -48,31 +56,98 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window.title = "Hearsay"
         window.center()
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 700, height: 560)
+        window.minSize = NSSize(width: 780, height: 560)
+
+        // Let the sidebar material run all the way up behind the traffic lights.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.styleMask.insert(.fullSizeContentView)
         
         self.init(window: window)
         window.delegate = self
         setupUI()
     }
+
+    // MARK: - Layout
+
+    /// One sidebar entry: pane identifier, label, SF Symbol.
+    private struct NavEntry {
+        let id: String
+        let title: String
+        let symbol: String
+    }
+
+    /// Sidebar grouping — flat lists get noisy past ~6 items.
+    private static let navSections: [(title: String?, entries: [NavEntry])] = [
+        (nil, [
+            NavEntry(id: "settings", title: "Settings", symbol: "gearshape"),
+            NavEntry(id: "models", title: "Models", symbol: "square.stack.3d.up"),
+            NavEntry(id: "microphone", title: "Microphone", symbol: "mic"),
+        ]),
+        ("Text", [
+            NavEntry(id: "shortcuts", title: "Replacements", symbol: "arrow.left.arrow.right"),
+            NavEntry(id: "cleanup", title: "Cleanup", symbol: "sparkles"),
+            NavEntry(id: "postProcessing", title: "Post Processing", symbol: "wand.and.stars"),
+        ]),
+        ("Library", [
+            NavEntry(id: "history", title: "History", symbol: "clock"),
+        ]),
+        ("App", [
+            NavEntry(id: "permissions", title: "Permissions", symbol: "lock.shield"),
+            NavEntry(id: "about", title: "About", symbol: "info.circle"),
+        ]),
+    ]
     
     private func setupUI() {
         guard let contentView = window?.contentView else { return }
-        
-        tabView.tabViewType = .topTabsBezelBorder
-        tabView.frame = contentView.bounds
-        tabView.autoresizingMask = [.width, .height]
-        contentView.addSubview(tabView)
-        
-        // Settings tab
-        settingsTab = SettingsTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
+
+        buildPanes()
+
+        // --- Sidebar surface -------------------------------------------------
+        let sidebar = SidebarMaterialView()
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(sidebar)
+
+        let separator = Theme.makeHairline(vertical: true)
+        contentView.addSubview(separator)
+
+        // --- Detail surface --------------------------------------------------
+        detailContainer.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(detailContainer)
+
+        NSLayoutConstraint.activate([
+            sidebar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            sidebar.topAnchor.constraint(equalTo: contentView.topAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            sidebar.widthAnchor.constraint(equalToConstant: 196),
+
+            separator.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            separator.topAnchor.constraint(equalTo: contentView.topAnchor),
+            separator.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+
+            detailContainer.leadingAnchor.constraint(equalTo: separator.trailingAnchor),
+            detailContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            detailContainer.topAnchor.constraint(equalTo: contentView.topAnchor),
+            detailContainer.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+
+            // The panes are constraint-driven, which makes AppKit size the window
+            // from the content's fitting size — without a floor it collapses to
+            // the sidebar's intrinsic 334×66. These keep the window usable.
+            detailContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 560),
+            contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 560),
+        ])
+
+        buildSidebar(in: sidebar)
+        selectPane("settings", animated: false)
+    }
+
+    private func buildPanes() {
+        let paneFrame = NSRect(x: 0, y: 0, width: 640, height: 560)
+
+        settingsTab = SettingsTabView(frame: paneFrame)
         settingsTab.onHotkeyChanged = { [weak self] in self?.onHotkeyChanged?() }
-        let settingsItem = NSTabViewItem(identifier: "settings")
-        settingsItem.label = "Settings"
-        settingsItem.view = settingsTab
-        tabView.addTabViewItem(settingsItem)
-        
-        // History tab
-        historyTab = HistoryTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
+
+        historyTab = HistoryTabView(frame: paneFrame)
         historyTab.onRetry = { [weak self] item, completion in
             if let handler = self?.onRetryTranscription {
                 handler(item, completion)
@@ -80,68 +155,141 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 completion(false)
             }
         }
-        let historyItem = NSTabViewItem(identifier: "history")
-        historyItem.label = "History"
-        historyItem.view = historyTab
-        tabView.addTabViewItem(historyItem)
-        
-        // Permissions tab
-        permissionsTab = PermissionsTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
-        let permissionsItem = NSTabViewItem(identifier: "permissions")
-        permissionsItem.label = "Permissions"
-        permissionsItem.view = permissionsTab
-        tabView.addTabViewItem(permissionsItem)
-        
-        // Models tab
-        modelsTab = ModelsTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
+
+        permissionsTab = PermissionsTabView(frame: paneFrame)
+
+        modelsTab = ModelsTabView(frame: paneFrame)
         modelsTab.onModelSelected = { [weak self] in
             self?.onModelChanged?()
         }
         modelsTab.isTranscriptionInProgress = { [weak self] in
             self?.isTranscriptionInProgress?() ?? false
         }
-        let modelsItem = NSTabViewItem(identifier: "models")
-        modelsItem.label = "Models"
-        modelsItem.view = modelsTab
-        tabView.addTabViewItem(modelsItem)
-        
-        // Microphone tab
-        microphoneTab = MicrophoneTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
-        let micItem = NSTabViewItem(identifier: "microphone")
-        micItem.label = "Microphone"
-        micItem.view = microphoneTab
-        tabView.addTabViewItem(micItem)
-        
-        // Text Replacements tab
-        shortcutsTab = ShortcutReplacementTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
-        let shortcutsItem = NSTabViewItem(identifier: "shortcuts")
-        shortcutsItem.label = "Replacements"
-        shortcutsItem.view = shortcutsTab
-        tabView.addTabViewItem(shortcutsItem)
 
-        // Cleanup tab
-        cleanupTab = DeterministicCleanupTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
-        let cleanupItem = NSTabViewItem(identifier: "cleanup")
-        cleanupItem.label = "Cleanup"
-        cleanupItem.view = cleanupTab
-        tabView.addTabViewItem(cleanupItem)
+        microphoneTab = MicrophoneTabView(frame: paneFrame)
+        shortcutsTab = ShortcutReplacementTabView(frame: paneFrame)
+        cleanupTab = DeterministicCleanupTabView(frame: paneFrame)
 
-        // Post Processing tab
-        postProcessingTab = CleanupTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
+        postProcessingTab = CleanupTabView(frame: paneFrame)
         postProcessingTab.onSettingsChanged = { [weak self] in
             self?.onCleanupSettingsChanged?()
         }
-        let postProcessingItem = NSTabViewItem(identifier: "postProcessing")
-        postProcessingItem.label = "Post Processing"
-        postProcessingItem.view = postProcessingTab
-        tabView.addTabViewItem(postProcessingItem)
 
-        // About tab
-        aboutTab = AboutTabView(frame: NSRect(x: 0, y: 0, width: 540, height: 400))
-        let aboutItem = NSTabViewItem(identifier: "about")
-        aboutItem.label = "About"
-        aboutItem.view = aboutTab
-        tabView.addTabViewItem(aboutItem)
+        aboutTab = AboutTabView(frame: paneFrame)
+
+        panes = [
+            "settings": settingsTab,
+            "models": modelsTab,
+            "microphone": microphoneTab,
+            "shortcuts": shortcutsTab,
+            "cleanup": cleanupTab,
+            "postProcessing": postProcessingTab,
+            "history": historyTab,
+            "permissions": permissionsTab,
+            "about": aboutTab,
+        ]
+    }
+
+    private func buildSidebar(in sidebar: NSView) {
+        let identity = SidebarIdentityView(
+            title: "Hearsay",
+            image: NSImage(named: NSImage.applicationIconName)
+        )
+        sidebar.addSubview(identity)
+
+        sidebarStack.orientation = .vertical
+        sidebarStack.alignment = .leading
+        sidebarStack.spacing = 2
+        sidebarStack.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(sidebarStack)
+
+        for (index, section) in Self.navSections.enumerated() {
+            if let title = section.title {
+                let header = SidebarSectionLabel(title: title)
+                sidebarStack.addArrangedSubview(header)
+                header.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor).isActive = true
+            } else if index > 0 {
+                let spacer = NSView()
+                spacer.translatesAutoresizingMaskIntoConstraints = false
+                spacer.heightAnchor.constraint(equalToConstant: 8).isActive = true
+                sidebarStack.addArrangedSubview(spacer)
+            }
+
+            for entry in section.entries {
+                let item = SidebarItemView(
+                    id: entry.id,
+                    title: entry.title,
+                    symbol: entry.symbol
+                ) { [weak self] id in
+                    self?.selectPane(id, animated: true)
+                }
+                sidebarItems.append(item)
+                sidebarStack.addArrangedSubview(item)
+                item.widthAnchor.constraint(equalTo: sidebarStack.widthAnchor).isActive = true
+            }
+        }
+
+        sidebarFooter = SidebarFooterView(version: "v\(AppInfo.version)")
+        sidebar.addSubview(sidebarFooter)
+
+        NSLayoutConstraint.activate([
+            // 46pt clears the traffic lights in a full-size-content window.
+            identity.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 46),
+            identity.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 6),
+            identity.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -6),
+
+            sidebarStack.topAnchor.constraint(equalTo: identity.bottomAnchor, constant: 16),
+            sidebarStack.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 6),
+            sidebarStack.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -6),
+            sidebarStack.bottomAnchor.constraint(lessThanOrEqualTo: sidebarFooter.topAnchor, constant: -8),
+
+            sidebarFooter.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 6),
+            sidebarFooter.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -6),
+            sidebarFooter.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -12),
+        ])
+    }
+
+    /// Swaps the detail pane, with a short crossfade.
+    private func selectPane(_ id: String, animated: Bool) {
+        guard let pane = panes[id], currentPaneID != id else { return }
+
+        detailContainer.subviews.forEach { $0.removeFromSuperview() }
+
+        pane.translatesAutoresizingMaskIntoConstraints = false
+        detailContainer.addSubview(pane)
+        NSLayoutConstraint.activate([
+            pane.leadingAnchor.constraint(equalTo: detailContainer.leadingAnchor),
+            pane.trailingAnchor.constraint(equalTo: detailContainer.trailingAnchor),
+            // Leave room for the (transparent) titlebar so content isn't clipped.
+            pane.topAnchor.constraint(equalTo: detailContainer.topAnchor, constant: 28),
+            pane.bottomAnchor.constraint(equalTo: detailContainer.bottomAnchor),
+        ])
+
+        if animated {
+            pane.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = Theme.Motion.smooth
+                context.allowsImplicitAnimation = true
+                pane.animator().alphaValue = 1
+            }
+        }
+
+        currentPaneID = id
+        for item in sidebarItems {
+            item.isActive = (item.identifier_ == id)
+        }
+
+        // The Settings pane owns the shortcut recorder, so it needs key capture.
+        if id == "settings" {
+            onWindowOpened?()
+        } else {
+            onWindowClosed?()
+        }
+    }
+
+    /// Reflected in the sidebar footer (model name + enabled dot).
+    func updateFooter(text: String, enabled: Bool) {
+        sidebarFooter?.update(text: text, enabled: enabled)
     }
     
     func show(tab: Tab = .settings) {
@@ -154,31 +302,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         postProcessingTab.refresh()
         aboutTab.refresh()
         
+        let paneID: String
         switch tab {
-        case .settings:
-            tabView.selectTabViewItem(withIdentifier: "settings")
-        case .history:
-            tabView.selectTabViewItem(withIdentifier: "history")
-        case .permissions:
-            tabView.selectTabViewItem(withIdentifier: "permissions")
-        case .models:
-            tabView.selectTabViewItem(withIdentifier: "models")
-        case .microphone:
-            tabView.selectTabViewItem(withIdentifier: "microphone")
-        case .cleanup:
-            tabView.selectTabViewItem(withIdentifier: "cleanup")
-        case .shortcuts:
-            tabView.selectTabViewItem(withIdentifier: "shortcuts")
-        case .postProcessing:
-            tabView.selectTabViewItem(withIdentifier: "postProcessing")
-        case .about:
-            tabView.selectTabViewItem(withIdentifier: "about")
+        case .settings: paneID = "settings"
+        case .history: paneID = "history"
+        case .permissions: paneID = "permissions"
+        case .models: paneID = "models"
+        case .microphone: paneID = "microphone"
+        case .cleanup: paneID = "cleanup"
+        case .shortcuts: paneID = "shortcuts"
+        case .postProcessing: paneID = "postProcessing"
+        case .about: paneID = "about"
         }
+        selectPane(paneID, animated: false)
         
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         
-        // Only pause hotkeys when opening the Settings tab (shortcut recorder needs key capture).
+        // Only pause hotkeys when opening the Settings pane (shortcut recorder needs key capture).
         if tab == .settings {
             onWindowOpened?()
         } else {
@@ -196,9 +337,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
     
     func windowDidBecomeKey(_ notification: Notification) {
-        // Only pause hotkeys when Settings tab is active (shortcut recorder needs key capture)
-        let currentID = tabView.selectedTabViewItem?.identifier as? String
-        if currentID == "settings" {
+        // Only pause hotkeys when Settings pane is active (shortcut recorder needs key capture)
+        if currentPaneID == "settings" {
             onWindowOpened?()
         } else {
             onWindowClosed?()
@@ -284,34 +424,22 @@ private class SettingsTabView: NSView {
     required init?(coder: NSCoder) { fatalError() }
     
     private func setupUI() {
-        // Header
-        if let settingsIconURL = Bundle.main.url(forResource: "settings-icon", withExtension: "png"),
-           let icon = NSImage(contentsOf: settingsIconURL) {
-            iconView.image = icon
-        } else if let icon = NSImage(named: NSImage.applicationIconName) {
-            iconView.image = icon
-        }
-        iconView.imageScaling = .scaleProportionallyUpOrDown
-        addSubview(iconView)
-        
-        titleLabel.font = .systemFont(ofSize: 18, weight: .bold)
-        titleLabel.alignment = .center
+        // Pane title. Identity (icon, name, version) now lives in the window's
+        // sidebar, so this pane just needs a left-aligned heading.
+        titleLabel.stringValue = "Settings"
+        titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        titleLabel.alignment = .left
         addSubview(titleLabel)
+
+        subtitleLabel.stringValue = "Recording, clipboard behaviour, and keyboard shortcuts."
         
-        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.font = .systemFont(ofSize: 12)
         subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.alignment = .center
+        subtitleLabel.alignment = .left
         addSubview(subtitleLabel)
 
-        versionLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        versionLabel.textColor = .tertiaryLabelColor
-        versionLabel.alignment = .center
-        addSubview(versionLabel)
-
-        buildLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        buildLabel.textColor = .tertiaryLabelColor
-        buildLabel.alignment = .center
-        addSubview(buildLabel)
+        // versionLabel / buildLabel are intentionally not added — the sidebar
+        // footer and the About pane carry version info now.
         
         // General box
         generalBox.title = "General"
@@ -525,24 +653,12 @@ private class SettingsTabView: NSView {
         let boxW = bounds.width - pad * 2
         var y = bounds.height - 16
         
-        // Header
-        let iconSz: CGFloat = 48
-        iconView.frame = NSRect(x: bounds.midX - iconSz/2, y: y - iconSz, width: iconSz, height: iconSz)
-        y -= iconSz + 4
-        
-        titleLabel.frame = NSRect(x: 0, y: y - 22, width: bounds.width, height: 22)
-        y -= 20
-        
-        subtitleLabel.frame = NSRect(x: 0, y: y - 16, width: bounds.width, height: 16)
-        y -= 18
+        // Pane heading + subhead, left-aligned (Managerie-style detail pane).
+        titleLabel.frame = NSRect(x: pad, y: y - 26, width: boxW, height: 26)
+        y -= 28
 
-        versionLabel.stringValue = AppInfo.versionSummary
-        versionLabel.frame = NSRect(x: 0, y: y - 14, width: bounds.width, height: 14)
-        y -= 14
-
-        buildLabel.stringValue = AppInfo.buildSummary
-        buildLabel.frame = NSRect(x: 0, y: y - 14, width: bounds.width, height: 14)
-        y -= 24
+        subtitleLabel.frame = NSRect(x: pad, y: y - 16, width: boxW, height: 16)
+        y -= 30
         
         // General box
         let generalH: CGFloat = 178
@@ -694,9 +810,10 @@ private class AboutTabView: NSView {
     private let subtitleLabel = NSTextField(labelWithString: "Local Speech-to-Text")
     private let versionLabel = NSTextField(labelWithString: AppInfo.versionSummary)
     private let buildLabel = NSTextField(labelWithString: AppInfo.buildSummary)
-    private let infoBox = NSBox()
+    private let infoCard = CardSectionView(title: "App Information", spacing: 2)
     private let copyButton = NSButton(title: "Copy Details", target: nil, action: nil)
     private let supportFolderButton = NSButton(title: "Open Support Folder", target: nil, action: nil)
+    private let buttonRow = NSStackView()
     private var rows: [AboutInfoRowView] = []
 
     override init(frame: NSRect) {
@@ -708,50 +825,81 @@ private class AboutTabView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func setupUI() {
+        // Identity row: icon beside the name, left-aligned (the old centred
+        // "app splash" header duplicated the sidebar identity).
         if let icon = NSImage(named: NSImage.applicationIconName) {
             iconView.image = icon
         }
         iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(iconView)
 
-        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
-        titleLabel.alignment = .center
+        titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        titleLabel.alignment = .left
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(titleLabel)
 
         subtitleLabel.font = .systemFont(ofSize: 12)
         subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.alignment = .center
+        subtitleLabel.alignment = .left
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(subtitleLabel)
 
-        versionLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        versionLabel.textColor = .secondaryLabelColor
-        versionLabel.alignment = .center
+        versionLabel.font = Theme.Font.metaDigits
+        versionLabel.textColor = .tertiaryLabelColor
+        versionLabel.alignment = .left
+        versionLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(versionLabel)
 
-        buildLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
-        buildLabel.textColor = .secondaryLabelColor
-        buildLabel.alignment = .center
-        addSubview(buildLabel)
-
-        infoBox.title = "App Information"
-        infoBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(infoBox)
+        // Build number is already one of the App Information rows.
+        buildLabel.isHidden = true
 
         rows = Self.infoItems().map { item in
             let row = AboutInfoRowView(title: item.title, value: item.value)
-            infoBox.contentView?.addSubview(row)
+            infoCard.addRow(row)
+            row.heightAnchor.constraint(equalToConstant: 26).isActive = true
             return row
         }
+        addSubview(infoCard)
 
         copyButton.bezelStyle = .rounded
         copyButton.target = self
         copyButton.action = #selector(copyDetails(_:))
-        addSubview(copyButton)
 
         supportFolderButton.bezelStyle = .rounded
         supportFolderButton.target = self
         supportFolderButton.action = #selector(openSupportFolder(_:))
-        addSubview(supportFolderButton)
+
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 10
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+        buttonRow.addArrangedSubview(supportFolderButton)
+        buttonRow.addArrangedSubview(copyButton)
+        addSubview(buttonRow)
+
+        NSLayoutConstraint.activate([
+            iconView.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
+            iconView.widthAnchor.constraint(equalToConstant: 52),
+            iconView.heightAnchor.constraint(equalToConstant: 52),
+
+            titleLabel.topAnchor.constraint(equalTo: iconView.topAnchor, constant: 2),
+            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 14),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
+
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+
+            versionLabel.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 3),
+            versionLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+
+            infoCard.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: Theme.Space.sectionGap),
+            infoCard.leadingAnchor.constraint(equalTo: iconView.leadingAnchor),
+            infoCard.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+
+            buttonRow.topAnchor.constraint(equalTo: infoCard.bottomAnchor, constant: 14),
+            buttonRow.leadingAnchor.constraint(equalTo: infoCard.leadingAnchor),
+        ])
     }
 
     func refresh() {
@@ -762,48 +910,6 @@ private class AboutTabView: NSView {
         for (row, item) in zip(rows, Self.infoItems()) {
             row.setTitle(item.title, value: item.value)
         }
-    }
-
-    override func layout() {
-        super.layout()
-
-        let pad: CGFloat = 20
-        var y = bounds.height - 34
-
-        let iconSize: CGFloat = 64
-        iconView.frame = NSRect(x: bounds.midX - iconSize / 2, y: y - iconSize, width: iconSize, height: iconSize)
-        y -= iconSize + 10
-
-        titleLabel.frame = NSRect(x: pad, y: y - 28, width: bounds.width - pad * 2, height: 28)
-        y -= 28
-        subtitleLabel.frame = NSRect(x: pad, y: y - 18, width: bounds.width - pad * 2, height: 18)
-        y -= 20
-        versionLabel.frame = NSRect(x: pad, y: y - 18, width: bounds.width - pad * 2, height: 18)
-        y -= 18
-        buildLabel.frame = NSRect(x: pad, y: y - 18, width: bounds.width - pad * 2, height: 18)
-        y -= 30
-
-        let boxWidth = min(CGFloat(680), bounds.width - pad * 2)
-        let rowHeight: CGFloat = 30
-        let boxHeight = CGFloat(rows.count) * rowHeight + 28
-        infoBox.frame = NSRect(x: bounds.midX - boxWidth / 2, y: y - boxHeight, width: boxWidth, height: boxHeight)
-
-        if let contentView = infoBox.contentView {
-            var rowY = contentView.bounds.height - rowHeight - 6
-            for row in rows {
-                row.frame = NSRect(x: 12, y: rowY, width: contentView.bounds.width - 24, height: rowHeight)
-                rowY -= rowHeight
-            }
-        }
-
-        let buttonY = max(pad, infoBox.frame.minY - 44)
-        supportFolderButton.sizeToFit()
-        copyButton.sizeToFit()
-        let supportWidth = supportFolderButton.frame.width + 20
-        let copyWidth = copyButton.frame.width + 20
-        let totalWidth = supportWidth + copyWidth + 12
-        supportFolderButton.frame = NSRect(x: bounds.midX - totalWidth / 2, y: buttonY, width: supportWidth, height: 30)
-        copyButton.frame = NSRect(x: supportFolderButton.frame.maxX + 12, y: buttonY, width: copyWidth, height: 30)
     }
 
     private static func infoItems() -> [(title: String, value: String)] {
@@ -875,8 +981,8 @@ private class AboutInfoRowView: NSView {
         super.layout()
 
         let titleWidth: CGFloat = 130
-        titleLabel.frame = NSRect(x: 0, y: 6, width: titleWidth, height: 18)
-        valueLabel.frame = NSRect(x: titleWidth + 12, y: 5, width: bounds.width - titleWidth - 12, height: 20)
+        titleLabel.frame = NSRect(x: 0, y: 4, width: titleWidth, height: 18)
+        valueLabel.frame = NSRect(x: titleWidth + 12, y: 3, width: max(0, bounds.width - titleWidth - 12), height: 20)
     }
 }
 
@@ -913,13 +1019,8 @@ private class ModelsTabView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func setupUI() {
-        titleLabel.font = .systemFont(ofSize: 22, weight: .semibold)
-        titleLabel.alignment = .center
+        Theme.styleHeading(titleLabel, subtitleLabel)
         addSubview(titleLabel)
-
-        subtitleLabel.font = .systemFont(ofSize: 13)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.alignment = .center
         addSubview(subtitleLabel)
 
         modelSelector.orientation = .vertical
@@ -1349,6 +1450,12 @@ private class SettingsModelCardView: NSView {
         deleteButton.isHidden = !installed
         needsLayout = true
     }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        // Re-resolve the pill's tinted background for the new appearance.
+        updateUI()
+    }
     
     override func layout() {
         super.layout()
@@ -1417,8 +1524,7 @@ private class MicrophoneTabView: NSView {
     private let titleLabel = NSTextField(labelWithString: "Microphone")
     private let subtitleLabel = NSTextField(labelWithString: "Choose which microphone Hearsay uses for recording.")
     
-    private let micBox = NSBox()
-    private let micLabel = NSTextField(labelWithString: "Input Device")
+    private let micCard = CardSectionView(title: "Input Device")
     private let micPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let activeLabel = NSTextField(labelWithString: "")
     
@@ -1434,34 +1540,40 @@ private class MicrophoneTabView: NSView {
     required init?(coder: NSCoder) { fatalError() }
     
     private func setupUI() {
-        titleLabel.font = .systemFont(ofSize: 18, weight: .bold)
-        titleLabel.alignment = .center
+        Theme.styleHeading(titleLabel, subtitleLabel)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(titleLabel)
-        
-        subtitleLabel.font = .systemFont(ofSize: 12)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.alignment = .center
         addSubview(subtitleLabel)
         
-        // Microphone selection box
-        micBox.title = "Input Device"
-        micBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(micBox)
-        
-        micLabel.font = .systemFont(ofSize: 13)
-        micLabel.textColor = .labelColor
-        micBox.contentView?.addSubview(micLabel)
-        
+        // Input-device card. The card header already says "Input Device", so the
+        // popup needs no second label next to it.
         micPopup.controlSize = .regular
         micPopup.font = .systemFont(ofSize: 13)
         micPopup.target = self
         micPopup.action = #selector(micSelected(_:))
-        micBox.contentView?.addSubview(micPopup)
+        micCard.addRow(micPopup)
         
         activeLabel.font = .systemFont(ofSize: 11)
         activeLabel.textColor = .secondaryLabelColor
         activeLabel.alignment = .left
-        micBox.contentView?.addSubview(activeLabel)
+        micCard.addRow(activeLabel)
+
+        addSubview(micCard)
+
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 20),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
+
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            micCard.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: Theme.Space.sectionGap),
+            micCard.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            micCard.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+        ])
     }
     
     private func setupNotifications() {
@@ -1513,31 +1625,6 @@ private class MicrophoneTabView: NSView {
         }
     }
     
-    override func layout() {
-        super.layout()
-        
-        let pad: CGFloat = 20
-        var y = bounds.height - 22
-        
-        titleLabel.frame = NSRect(x: pad, y: y - 24, width: bounds.width - pad * 2, height: 24)
-        y -= 32
-        subtitleLabel.frame = NSRect(x: pad, y: y - 18, width: bounds.width - pad * 2, height: 18)
-        y -= 36
-        
-        // Mic box
-        let boxH: CGFloat = 110
-        micBox.frame = NSRect(x: pad, y: y - boxH, width: bounds.width - pad * 2, height: boxH)
-        
-        if let cv = micBox.contentView {
-            let inset: CGFloat = 12
-            let popupW: CGFloat = cv.bounds.width - inset * 2
-            
-            micLabel.frame = NSRect(x: inset, y: cv.bounds.height - 26, width: 200, height: 18)
-            micPopup.frame = NSRect(x: inset, y: cv.bounds.height - 56, width: popupW, height: 26)
-            activeLabel.frame = NSRect(x: inset, y: cv.bounds.height - 78, width: popupW, height: 16)
-        }
-    }
-    
     @objc private func micSelected(_ sender: NSPopUpButton) {
         let idx = sender.indexOfSelectedItem
         
@@ -1583,13 +1670,8 @@ private class PermissionsTabView: NSView {
     }
     
     private func setupUI() {
-        titleLabel.font = .systemFont(ofSize: 18, weight: .bold)
-        titleLabel.alignment = .center
+        Theme.styleHeading(titleLabel, subtitleLabel)
         addSubview(titleLabel)
-        
-        subtitleLabel.font = .systemFont(ofSize: 12)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.alignment = .center
         addSubview(subtitleLabel)
         
         microphoneRow = PermissionStatusRowView(
@@ -1658,7 +1740,7 @@ private class PermissionsTabView: NSView {
         super.layout()
         
         var y = bounds.height - 22
-        titleLabel.frame = NSRect(x: 20, y: y - 24, width: bounds.width - 40, height: 24)
+        titleLabel.frame = NSRect(x: 20, y: y - 27, width: bounds.width - 40, height: 27)
         y -= 30
         subtitleLabel.frame = NSRect(x: 20, y: y - 18, width: bounds.width - 40, height: 18)
         y -= 24
@@ -2307,13 +2389,16 @@ private class DeterministicCleanupTabView: NSView {
     private let titleLabel = NSTextField(labelWithString: "Cleanup")
     private let subtitleLabel = NSTextField(labelWithString: "Remove deterministic transcription errors before text is inserted or copied.")
     private let enabledCheckbox = NSButton(checkboxWithTitle: "Enable cleanup rules", target: nil, action: nil)
-    private let rulesBox = NSBox()
-    private let headerLabel = NSTextField(labelWithString: "On        Pattern")
+    private let rulesCard = CardSectionView(title: "Rules", spacing: 8)
+    private let headerRow = NSView()
+    private let onHeader = NSTextField(labelWithString: "On")
+    private let patternHeader = NSTextField(labelWithString: "Pattern")
     private let scrollView = NSScrollView()
-    private let rowsContainer = NSView()
+    private let rowsContainer = RowListView()
+    private let buttonRow = NSStackView()
     private let addButton = NSButton(title: "Add Rule", target: nil, action: nil)
     private let resetButton = NSButton(title: "Reset Defaults", target: nil, action: nil)
-    private let exampleBox = NSBox()
+    private let exampleCard = CardSectionView(title: "Example")
     private let exampleLabel = NSTextField(wrappingLabelWithString: "")
 
     private var rules: [CleanupRule] = []
@@ -2328,55 +2413,95 @@ private class DeterministicCleanupTabView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func setupUI() {
-        titleLabel.font = .systemFont(ofSize: 18, weight: .bold)
-        titleLabel.alignment = .center
-        addSubview(titleLabel)
-
-        subtitleLabel.font = .systemFont(ofSize: 12)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.alignment = .center
-        subtitleLabel.maximumNumberOfLines = 2
-        subtitleLabel.lineBreakMode = .byWordWrapping
+        Theme.styleHeading(titleLabel, subtitleLabel)
         subtitleLabel.preferredMaxLayoutWidth = 520
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleLabel)
         addSubview(subtitleLabel)
 
         enabledCheckbox.target = self
         enabledCheckbox.action = #selector(enabledChanged(_:))
+        enabledCheckbox.translatesAutoresizingMaskIntoConstraints = false
         addSubview(enabledCheckbox)
 
-        rulesBox.title = "Rules"
-        rulesBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(rulesBox)
+        // Column headers aligned to CleanupRuleRowView's columns.
+        for header in [onHeader, patternHeader] {
+            header.font = .systemFont(ofSize: 11, weight: .medium)
+            header.textColor = .secondaryLabelColor
+            header.translatesAutoresizingMaskIntoConstraints = false
+            headerRow.addSubview(header)
+        }
+        NSLayoutConstraint.activate([
+            headerRow.heightAnchor.constraint(equalToConstant: 14),
+            onHeader.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor, constant: 4),
+            onHeader.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            patternHeader.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor, constant: CleanupRuleRowView.patternColumnX),
+            patternHeader.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+        ])
+        rulesCard.addRow(headerRow)
 
-        headerLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        headerLabel.textColor = .secondaryLabelColor
-        rulesBox.contentView?.addSubview(headerLabel)
-
-        scrollView.borderType = .bezelBorder
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.documentView = rowsContainer
-        rulesBox.contentView?.addSubview(scrollView)
+        rowsContainer.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            // Full-width rows; height comes from the list's intrinsic size.
+            rowsContainer.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            rowsContainer.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            rowsContainer.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+        ])
+        rulesCard.addRow(scrollView)
 
         addButton.bezelStyle = .rounded
         addButton.target = self
         addButton.action = #selector(addRuleTapped)
-        rulesBox.contentView?.addSubview(addButton)
 
         resetButton.bezelStyle = .rounded
         resetButton.target = self
         resetButton.action = #selector(resetRulesTapped)
-        rulesBox.contentView?.addSubview(resetButton)
 
-        exampleBox.title = "Example"
-        exampleBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(exampleBox)
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.addArrangedSubview(addButton)
+        buttonRow.addView(resetButton, in: .trailing)
+        rulesCard.addRow(buttonRow)
+
+        addSubview(rulesCard)
 
         exampleLabel.stringValue = "Before: \"So uh, the meeting is tomorrow.\"\nAfter:    \"So the meeting is tomorrow.\""
         exampleLabel.font = .systemFont(ofSize: 11)
         exampleLabel.textColor = .secondaryLabelColor
         exampleLabel.maximumNumberOfLines = 3
-        exampleBox.contentView?.addSubview(exampleLabel)
+        exampleCard.addRow(exampleLabel)
+        addSubview(exampleCard)
+
+        let pad: CGFloat = 20
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
+
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            enabledCheckbox.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 14),
+            enabledCheckbox.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+
+            rulesCard.topAnchor.constraint(equalTo: enabledCheckbox.bottomAnchor, constant: 14),
+            rulesCard.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            rulesCard.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 140),
+
+            exampleCard.topAnchor.constraint(equalTo: rulesCard.bottomAnchor, constant: 12),
+            exampleCard.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            exampleCard.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            exampleCard.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -pad),
+        ])
     }
 
     func refresh() {
@@ -2385,45 +2510,6 @@ private class DeterministicCleanupTabView: NSView {
         reloadRows()
     }
 
-    override func layout() {
-        super.layout()
-
-        let pad: CGFloat = 20
-        let contentW = bounds.width - pad * 2
-        var y = bounds.height - 22
-
-        titleLabel.frame = NSRect(x: pad, y: y - 24, width: contentW, height: 24)
-        y -= 30
-        subtitleLabel.frame = NSRect(x: pad, y: y - 34, width: contentW, height: 34)
-        y -= 46
-        enabledCheckbox.frame = NSRect(x: pad, y: y - 20, width: contentW, height: 20)
-        y -= 34
-
-        let exampleH: CGFloat = 72
-        let rulesBottom = pad + exampleH + 12
-        rulesBox.frame = NSRect(x: pad, y: rulesBottom, width: contentW, height: max(220, y - rulesBottom))
-        layoutRulesBox()
-
-        exampleBox.frame = NSRect(x: pad, y: pad, width: contentW, height: exampleH)
-        if let cv = exampleBox.contentView {
-            exampleLabel.frame = cv.bounds.insetBy(dx: 12, dy: 4)
-        }
-    }
-
-    private func layoutRulesBox() {
-        guard let cv = rulesBox.contentView else { return }
-        let inset: CGFloat = 10
-        headerLabel.frame = NSRect(x: inset, y: cv.bounds.height - 24, width: cv.bounds.width - inset * 2, height: 16)
-        addButton.frame = NSRect(x: inset, y: 8, width: 92, height: 26)
-        resetButton.frame = NSRect(x: cv.bounds.width - inset - 112, y: 8, width: 112, height: 26)
-        scrollView.frame = NSRect(
-            x: inset,
-            y: 42,
-            width: cv.bounds.width - inset * 2,
-            height: max(80, cv.bounds.height - 70)
-        )
-        layoutRows()
-    }
 
     private func reloadRows() {
         rowViews.forEach { $0.removeFromSuperview() }
@@ -2435,22 +2521,13 @@ private class DeterministicCleanupTabView: NSView {
             row.onDelete = { [weak self] id in
                 self?.deleteRule(id)
             }
-            rowsContainer.addSubview(row)
             return row
         }
         layoutRows()
     }
 
     private func layoutRows() {
-        let rowH: CGFloat = 38
-        let gap: CGFloat = 6
-        let totalH = max(scrollView.contentSize.height, CGFloat(rowViews.count) * (rowH + gap))
-        rowsContainer.frame = NSRect(x: 0, y: 0, width: scrollView.contentSize.width, height: totalH)
-
-        for (index, row) in rowViews.enumerated() {
-            let y = totalH - CGFloat(index + 1) * rowH - CGFloat(index) * gap
-            row.frame = NSRect(x: 0, y: y, width: rowsContainer.bounds.width, height: rowH)
-        }
+        rowsContainer.setRows(rowViews)
     }
 
     private func persist() {
@@ -2498,8 +2575,6 @@ private class CleanupRuleRowView: NSView, NSTextFieldDelegate {
         self.rule = rule
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.cornerRadius = 6
 
         checkbox.state = rule.isEnabled ? .on : .off
         checkbox.target = self
@@ -2518,14 +2593,36 @@ private class CleanupRuleRowView: NSView, NSTextFieldDelegate {
         addSubview(deleteButton)
     }
 
+
+    override var wantsUpdateLayer: Bool { true }
+
+    /// Rows sit inside a themed card, so they use the shared wash rather than
+    /// `controlBackgroundColor` (which is opaque white in Light and was baked in
+    /// at init, leaving white slabs in Dark Mode).
+    override func updateLayer() {
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = Theme.wash(Theme.Wash.control).cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
     required init?(coder: NSCoder) { fatalError() }
+
+    /// X origin of the pattern column, shared with the tab's column headers.
+    static let patternColumnX: CGFloat = 40
 
     override func layout() {
         super.layout()
         let inset: CGFloat = 8
         checkbox.frame = NSRect(x: inset, y: 9, width: 24, height: 20)
         deleteButton.frame = NSRect(x: bounds.width - inset - 28, y: 5, width: 28, height: 28)
-        patternField.frame = NSRect(x: 40, y: 6, width: max(80, bounds.width - 82), height: 24)
+        patternField.frame = NSRect(x: Self.patternColumnX, y: 6, width: max(80, bounds.width - 82), height: 24)
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -2549,12 +2646,15 @@ private class ShortcutReplacementTabView: NSView {
     private let titleLabel = NSTextField(labelWithString: "Text Replacements")
     private let subtitleLabel = NSTextField(labelWithString: "Replace spoken phrases like my email with saved text snippets.")
     private let enabledCheckbox = NSButton(checkboxWithTitle: "Enable text replacements", target: nil, action: nil)
-    private let shortcutsBox = NSBox()
-    private let headerLabel = NSTextField(labelWithString: "On        Key                                                      Value")
+    private let shortcutsCard = CardSectionView(title: "Replacement Rules", spacing: 8)
+    private let headerRow = NSView()
+    private let onHeader = NSTextField(labelWithString: "On")
+    private let keyHeader = NSTextField(labelWithString: "Key")
+    private let valueHeader = NSTextField(labelWithString: "Value")
     private let scrollView = NSScrollView()
-    private let rowsContainer = NSView()
+    private let rowsContainer = RowListView()
     private let addButton = NSButton(title: "+", target: nil, action: nil)
-    private let exampleBox = NSBox()
+    private let exampleCard = CardSectionView(title: "Example")
     private let exampleLabel = NSTextField(wrappingLabelWithString: "")
 
     private var shortcuts: [TextShortcut] = []
@@ -2574,51 +2674,95 @@ private class ShortcutReplacementTabView: NSView {
     required init?(coder: NSCoder) { fatalError() }
 
     private func setupUI() {
-        titleLabel.font = .systemFont(ofSize: 18, weight: .bold)
-        titleLabel.alignment = .center
-        addSubview(titleLabel)
-
-        subtitleLabel.font = .systemFont(ofSize: 12)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.alignment = .center
-        subtitleLabel.maximumNumberOfLines = 2
-        subtitleLabel.lineBreakMode = .byWordWrapping
+        Theme.styleHeading(titleLabel, subtitleLabel)
         subtitleLabel.preferredMaxLayoutWidth = 520
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(titleLabel)
         addSubview(subtitleLabel)
 
         enabledCheckbox.target = self
         enabledCheckbox.action = #selector(enabledChanged(_:))
+        enabledCheckbox.translatesAutoresizingMaskIntoConstraints = false
         addSubview(enabledCheckbox)
 
-        shortcutsBox.title = "Replacement Rules"
-        shortcutsBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(shortcutsBox)
+        // Column headers, positioned to match ShortcutRuleRowView's columns.
+        for header in [onHeader, keyHeader, valueHeader] {
+            header.font = .systemFont(ofSize: 11, weight: .medium)
+            header.textColor = .secondaryLabelColor
+            header.translatesAutoresizingMaskIntoConstraints = false
+            headerRow.addSubview(header)
+        }
+        NSLayoutConstraint.activate([
+            headerRow.heightAnchor.constraint(equalToConstant: 14),
+            onHeader.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor, constant: 4),
+            onHeader.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            keyHeader.leadingAnchor.constraint(equalTo: headerRow.leadingAnchor, constant: ShortcutRuleRowView.keyColumnX),
+            keyHeader.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+            valueHeader.leadingAnchor.constraint(equalTo: headerRow.centerXAnchor, constant: 24),
+            valueHeader.centerYAnchor.constraint(equalTo: headerRow.centerYAnchor),
+        ])
+        shortcutsCard.addRow(headerRow)
 
-        headerLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        headerLabel.textColor = .secondaryLabelColor
-        shortcutsBox.contentView?.addSubview(headerLabel)
-
-        scrollView.borderType = .bezelBorder
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.documentView = rowsContainer
-        shortcutsBox.contentView?.addSubview(scrollView)
+        rowsContainer.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            // Full-width rows; height comes from the list's intrinsic size.
+            rowsContainer.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
+            rowsContainer.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
+            rowsContainer.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
+        ])
+        shortcutsCard.addRow(scrollView)
 
         addButton.bezelStyle = .rounded
-        addButton.font = .systemFont(ofSize: 17, weight: .medium)
+        addButton.font = .systemFont(ofSize: 15, weight: .medium)
         addButton.target = self
         addButton.action = #selector(addShortcutTapped)
-        shortcutsBox.contentView?.addSubview(addButton)
+        addButton.translatesAutoresizingMaskIntoConstraints = false
+        addButton.toolTip = "Add a replacement rule"
+        shortcutsCard.stack.addArrangedSubview(addButton)
+        NSLayoutConstraint.activate([
+            addButton.widthAnchor.constraint(equalToConstant: 34),
+            addButton.heightAnchor.constraint(equalToConstant: 24),
+        ])
 
-        exampleBox.title = "Example"
-        exampleBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(exampleBox)
+        addSubview(shortcutsCard)
 
         exampleLabel.stringValue = "Key: my email\nValue: sam@example.com"
         exampleLabel.font = .systemFont(ofSize: 11)
         exampleLabel.textColor = .secondaryLabelColor
         exampleLabel.maximumNumberOfLines = 3
-        exampleBox.contentView?.addSubview(exampleLabel)
+        exampleCard.addRow(exampleLabel)
+        addSubview(exampleCard)
+
+        let pad: CGFloat = 20
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
+
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            enabledCheckbox.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 14),
+            enabledCheckbox.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+
+            shortcutsCard.topAnchor.constraint(equalTo: enabledCheckbox.bottomAnchor, constant: 14),
+            shortcutsCard.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            shortcutsCard.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 140),
+
+            exampleCard.topAnchor.constraint(equalTo: shortcutsCard.bottomAnchor, constant: 12),
+            exampleCard.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            exampleCard.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            exampleCard.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -pad),
+        ])
     }
 
     func refresh() {
@@ -2630,44 +2774,6 @@ private class ShortcutReplacementTabView: NSView {
         reloadRows()
     }
 
-    override func layout() {
-        super.layout()
-
-        let pad: CGFloat = 20
-        let contentW = bounds.width - pad * 2
-        var y = bounds.height - 22
-
-        titleLabel.frame = NSRect(x: pad, y: y - 24, width: contentW, height: 24)
-        y -= 30
-        subtitleLabel.frame = NSRect(x: pad, y: y - 34, width: contentW, height: 34)
-        y -= 46
-        enabledCheckbox.frame = NSRect(x: pad, y: y - 20, width: contentW, height: 20)
-        y -= 34
-
-        let exampleH: CGFloat = 72
-        let boxBottom = pad + exampleH + 12
-        shortcutsBox.frame = NSRect(x: pad, y: boxBottom, width: contentW, height: max(220, y - boxBottom))
-        layoutShortcutsBox()
-
-        exampleBox.frame = NSRect(x: pad, y: pad, width: contentW, height: exampleH)
-        if let cv = exampleBox.contentView {
-            exampleLabel.frame = cv.bounds.insetBy(dx: 12, dy: 4)
-        }
-    }
-
-    private func layoutShortcutsBox() {
-        guard let cv = shortcutsBox.contentView else { return }
-        let inset: CGFloat = 10
-        headerLabel.frame = NSRect(x: inset, y: cv.bounds.height - 24, width: cv.bounds.width - inset * 2, height: 16)
-        addButton.frame = NSRect(x: inset, y: 8, width: 34, height: 26)
-        scrollView.frame = NSRect(
-            x: inset,
-            y: 42,
-            width: cv.bounds.width - inset * 2,
-            height: max(80, cv.bounds.height - 70)
-        )
-        layoutRows()
-    }
 
     private func reloadRows() {
         rowViews.forEach { $0.removeFromSuperview() }
@@ -2688,22 +2794,13 @@ private class ShortcutReplacementTabView: NSView {
             row.onEditingEnded = { [weak self] id in
                 self?.pruneEmptyShortcutIfInactive(id)
             }
-            rowsContainer.addSubview(row)
             return row
         }
         layoutRows()
     }
 
     private func layoutRows() {
-        let rowH: CGFloat = 38
-        let gap: CGFloat = 6
-        let totalH = max(scrollView.contentSize.height, CGFloat(rowViews.count) * (rowH + gap))
-        rowsContainer.frame = NSRect(x: 0, y: 0, width: scrollView.contentSize.width, height: totalH)
-
-        for (index, row) in rowViews.enumerated() {
-            let y = totalH - CGFloat(index + 1) * rowH - CGFloat(index) * gap
-            row.frame = NSRect(x: 0, y: y, width: rowsContainer.bounds.width, height: rowH)
-        }
+        rowsContainer.setRows(rowViews)
     }
 
     private func persist() {
@@ -2823,8 +2920,6 @@ private class ShortcutRuleRowView: NSView, NSTextFieldDelegate {
         self.shortcut = shortcut
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        layer?.cornerRadius = 6
 
         checkbox.state = shortcut.isEnabled ? .on : .off
         checkbox.target = self
@@ -2848,7 +2943,29 @@ private class ShortcutRuleRowView: NSView, NSTextFieldDelegate {
         addSubview(deleteButton)
     }
 
+
+    override var wantsUpdateLayer: Bool { true }
+
+    /// Rows sit inside a themed card, so they use the shared wash rather than
+    /// `controlBackgroundColor` (which is opaque white in Light and was baked in
+    /// at init, leaving white slabs in Dark Mode).
+    override func updateLayer() {
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = Theme.wash(Theme.Wash.control).cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
     required init?(coder: NSCoder) { fatalError() }
+
+    /// X origin of the key column, shared with the tab's column headers.
+    static let keyColumnX: CGFloat = 40
 
     override func layout() {
         super.layout()
@@ -2856,7 +2973,7 @@ private class ShortcutRuleRowView: NSView, NSTextFieldDelegate {
         checkbox.frame = NSRect(x: inset, y: 9, width: 24, height: 20)
         deleteButton.frame = NSRect(x: bounds.width - inset - 28, y: 5, width: 28, height: 28)
 
-        let fieldsX: CGFloat = 40
+        let fieldsX: CGFloat = Self.keyColumnX
         let gap: CGFloat = 8
         let available = max(160, bounds.width - fieldsX - 44)
         let fieldW = (available - gap) / 2
@@ -2931,7 +3048,8 @@ private class CleanupTabView: NSView, NSTextViewDelegate {
     
     private let enabledCheckbox = NSButton(checkboxWithTitle: "Enable LLM post processing", target: nil, action: nil)
     
-    private let modelBox = NSBox()
+    private let modelCard = CardSectionView(title: "Post Processing Model", spacing: 4)
+    private let modelNameRow = NSStackView()
     private let modelNameLabel = NSTextField(labelWithString: "")
     private let modelSizeLabel = NSTextField(labelWithString: "")
     private let modelDescLabel = NSTextField(labelWithString: "")
@@ -2943,15 +3061,18 @@ private class CleanupTabView: NSView, NSTextViewDelegate {
     private let progressContainer = NSView()
     private let progressBar = NSProgressIndicator()
     private let progressLabel = NSTextField(labelWithString: "")
+    private var progressHeight: NSLayoutConstraint!
 
-    private let promptBox = NSBox()
+    private let promptCard = CardSectionView(title: "Post Processing Prompt", spacing: 8)
+    private let promptButtonRow = NSStackView()
+    private let buttonRow = NSStackView()
     private let promptScrollView = NSScrollView()
     private let promptTextView = NSTextView()
     private let resetPromptButton = NSButton(title: "Reset to Default Prompt", target: nil, action: nil)
     private let openPromptEditorButton = NSButton(title: "Open Full Editor…", target: nil, action: nil)
     private let promptEditorController = CleanupPromptEditorController()
     
-    private let exampleBox = NSBox()
+    private let exampleCard = CardSectionView(title: "Example")
     private let exampleLabel = NSTextField(wrappingLabelWithString: "")
     
     override init(frame: NSRect) {
@@ -2964,82 +3085,87 @@ private class CleanupTabView: NSView, NSTextViewDelegate {
     required init?(coder: NSCoder) { fatalError() }
     
     private func setupUI() {
-        // Title
-        titleLabel.font = .systemFont(ofSize: 18, weight: .bold)
-        titleLabel.alignment = .center
-        addSubview(titleLabel)
-        
-        subtitleLabel.font = .systemFont(ofSize: 12)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.alignment = .center
-        subtitleLabel.maximumNumberOfLines = 2
-        subtitleLabel.lineBreakMode = .byWordWrapping
+        Theme.styleHeading(titleLabel, subtitleLabel)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
         subtitleLabel.preferredMaxLayoutWidth = 480
+        addSubview(titleLabel)
         addSubview(subtitleLabel)
         
         // Enable checkbox
         enabledCheckbox.target = self
         enabledCheckbox.action = #selector(enabledChanged(_:))
+        enabledCheckbox.translatesAutoresizingMaskIntoConstraints = false
         addSubview(enabledCheckbox)
         
-        // Model card box
-        modelBox.title = "Post Processing Model"
-        modelBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(modelBox)
-        
+        // Model card
         let model = CleanupModelDownloader.CleanupModel.qwen35_0_8b
         modelNameLabel.stringValue = model.displayName
         modelNameLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        modelBox.contentView?.addSubview(modelNameLabel)
         
         modelSizeLabel.stringValue = "Size: \(model.estimatedSizeString)"
         modelSizeLabel.font = .systemFont(ofSize: 11)
         modelSizeLabel.textColor = .secondaryLabelColor
-        modelBox.contentView?.addSubview(modelSizeLabel)
         
         modelDescLabel.stringValue = model.description
         modelDescLabel.font = .systemFont(ofSize: 11)
         modelDescLabel.textColor = .tertiaryLabelColor
-        modelBox.contentView?.addSubview(modelDescLabel)
+        modelDescLabel.lineBreakMode = .byTruncatingTail
         
         modelStatusLabel.font = .systemFont(ofSize: 11, weight: .medium)
         modelStatusLabel.alignment = .right
-        modelBox.contentView?.addSubview(modelStatusLabel)
+        modelStatusLabel.setContentHuggingPriority(.required, for: .horizontal)
+
+        // Name on the left, status pinned right.
+        modelNameRow.orientation = .horizontal
+        modelNameRow.spacing = 8
+        modelNameRow.addArrangedSubview(modelNameLabel)
+        modelNameRow.addView(modelStatusLabel, in: .trailing)
+        modelCard.addRow(modelNameRow)
+        modelCard.addRow(modelSizeLabel)
+        modelCard.addRow(modelDescLabel)
+        addSubview(modelCard)
         
-        // Action button
+        // Action + delete, side by side under the card
         actionButton.bezelStyle = .rounded
         actionButton.controlSize = .large
         actionButton.target = self
         actionButton.action = #selector(actionTapped)
-        addSubview(actionButton)
         
-        // Delete button
         deleteButton.bezelStyle = .rounded
         deleteButton.controlSize = .regular
         deleteButton.contentTintColor = .systemRed
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped)
-        addSubview(deleteButton)
+
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 10
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+        buttonRow.addArrangedSubview(actionButton)
+        buttonRow.addArrangedSubview(deleteButton)
+        addSubview(buttonRow)
         
         // Progress
         progressContainer.isHidden = true
+        progressContainer.translatesAutoresizingMaskIntoConstraints = false
         addSubview(progressContainer)
         
         progressBar.style = .bar
         progressBar.isIndeterminate = false
         progressBar.minValue = 0
         progressBar.maxValue = 1
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
         progressContainer.addSubview(progressBar)
         
         progressLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         progressLabel.textColor = .secondaryLabelColor
         progressLabel.alignment = .center
+        progressLabel.translatesAutoresizingMaskIntoConstraints = false
         progressContainer.addSubview(progressLabel)
 
-        // Prompt editor
-        promptBox.title = "Post Processing Prompt"
-        promptBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(promptBox)
+        // Collapsed to zero height while idle so it leaves no gap.
+        progressHeight = progressContainer.heightAnchor.constraint(equalToConstant: 0)
+        progressHeight.isActive = true
 
         promptScrollView.borderType = .bezelBorder
         promptScrollView.hasVerticalScroller = true
@@ -3056,25 +3182,26 @@ private class CleanupTabView: NSView, NSTextViewDelegate {
         promptTextView.delegate = self
         promptTextView.string = CleanupSettings.prompt
         promptScrollView.documentView = promptTextView
-        promptBox.contentView?.addSubview(promptScrollView)
 
         resetPromptButton.bezelStyle = .rounded
         resetPromptButton.controlSize = .small
         resetPromptButton.target = self
         resetPromptButton.action = #selector(resetPromptTapped)
-        promptBox.contentView?.addSubview(resetPromptButton)
 
         openPromptEditorButton.bezelStyle = .rounded
         openPromptEditorButton.controlSize = .small
         openPromptEditorButton.target = self
         openPromptEditorButton.action = #selector(openPromptEditorTapped)
-        promptBox.contentView?.addSubview(openPromptEditorButton)
+
+        promptButtonRow.orientation = .horizontal
+        promptButtonRow.spacing = 8
+        promptButtonRow.addArrangedSubview(openPromptEditorButton)
+        promptButtonRow.addView(resetPromptButton, in: .trailing)
+        promptCard.addRow(promptButtonRow)
+        promptCard.addRow(promptScrollView)
+        addSubview(promptCard)
         
-        // Example box
-        exampleBox.title = "Example"
-        exampleBox.titleFont = .systemFont(ofSize: 12, weight: .semibold)
-        addSubview(exampleBox)
-        
+        // Example card
         let exampleText = """
         Before: "So um like the meeting is at 3pm you know on Tuesday"
         After:    "The meeting is at 3pm on Tuesday"
@@ -3083,7 +3210,54 @@ private class CleanupTabView: NSView, NSTextViewDelegate {
         exampleLabel.font = .systemFont(ofSize: 11)
         exampleLabel.textColor = .secondaryLabelColor
         exampleLabel.maximumNumberOfLines = 3
-        exampleBox.contentView?.addSubview(exampleLabel)
+        exampleCard.addRow(exampleLabel)
+        addSubview(exampleCard)
+
+        let pad: CGFloat = 20
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: pad),
+            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -pad),
+
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            enabledCheckbox.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 14),
+            enabledCheckbox.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+
+            modelCard.topAnchor.constraint(equalTo: enabledCheckbox.bottomAnchor, constant: 14),
+            modelCard.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            modelCard.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            buttonRow.topAnchor.constraint(equalTo: modelCard.bottomAnchor, constant: 12),
+            buttonRow.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+
+            progressContainer.topAnchor.constraint(equalTo: buttonRow.bottomAnchor, constant: 8),
+            progressContainer.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            progressContainer.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            progressBar.topAnchor.constraint(equalTo: progressContainer.topAnchor),
+            progressBar.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor),
+            progressBar.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor),
+            progressBar.heightAnchor.constraint(equalToConstant: 18),
+
+            progressLabel.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 2),
+            progressLabel.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor),
+            progressLabel.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor),
+
+            // Prompt card absorbs the leftover vertical space.
+            promptCard.topAnchor.constraint(equalTo: progressContainer.bottomAnchor, constant: 14),
+            promptCard.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            promptCard.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+
+            promptScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 90),
+
+            exampleCard.topAnchor.constraint(equalTo: promptCard.bottomAnchor, constant: 12),
+            exampleCard.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            exampleCard.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
+            exampleCard.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -pad),
+        ])
     }
     
     private func setupObservers() {
@@ -3118,9 +3292,9 @@ private class CleanupTabView: NSView, NSTextViewDelegate {
         if downloader.isDownloading {
             actionButton.isHidden = true
             deleteButton.isHidden = true
-            progressContainer.isHidden = false
+            setProgressVisible(true)
         } else {
-            progressContainer.isHidden = true
+            setProgressVisible(false)
             
             if installed {
                 actionButton.isHidden = true
@@ -3145,96 +3319,13 @@ private class CleanupTabView: NSView, NSTextViewDelegate {
         }
     }
     
-    override func layout() {
-        super.layout()
-        
-        let pad: CGFloat = 20
-        let contentW = bounds.width - pad * 2
-        var y = bounds.height - 22
-        
-        // Title
-        titleLabel.frame = NSRect(x: pad, y: y - 24, width: contentW, height: 24)
-        y -= 30
-        
-        subtitleLabel.frame = NSRect(x: pad, y: y - 34, width: contentW, height: 34)
-        y -= 46
-        
-        // Checkbox
-        enabledCheckbox.frame = NSRect(x: pad, y: y - 20, width: contentW, height: 20)
-        y -= 32
-        
-        // Model box
-        let boxH: CGFloat = 90
-        modelBox.frame = NSRect(x: pad, y: y - boxH, width: contentW, height: boxH)
-        if let cv = modelBox.contentView {
-            let inset: CGFloat = 12
-            modelNameLabel.frame = NSRect(x: inset, y: cv.bounds.height - 24, width: cv.bounds.width - inset * 2 - 120, height: 18)
-            modelStatusLabel.frame = NSRect(x: cv.bounds.width - inset - 120, y: cv.bounds.height - 24, width: 120, height: 18)
-            modelSizeLabel.frame = NSRect(x: inset, y: cv.bounds.height - 44, width: cv.bounds.width - inset * 2, height: 16)
-            modelDescLabel.frame = NSRect(x: inset, y: cv.bounds.height - 62, width: cv.bounds.width - inset * 2, height: 16)
-        }
-        y -= boxH + 12
-        
-        // Action / Progress / Delete
-        let buttonW: CGFloat = 200
-        actionButton.frame = NSRect(x: bounds.midX - buttonW / 2, y: y - 34, width: buttonW, height: 34)
-        deleteButton.sizeToFit()
-        deleteButton.frame.origin = NSPoint(x: bounds.midX - deleteButton.frame.width / 2, y: y - 30)
-
-        progressContainer.frame = NSRect(x: 60, y: y - 42, width: bounds.width - 120, height: 42)
-        progressBar.frame = NSRect(x: 0, y: 20, width: progressContainer.bounds.width, height: 18)
-        progressLabel.frame = NSRect(x: 0, y: 0, width: progressContainer.bounds.width, height: 16)
-        y -= 54
-
-        // Prompt + Example layout (adaptive so controls never overlap)
-        let bottomPad: CGFloat = 12
-        let spacing: CGFloat = 10
-        let minPromptH: CGFloat = 90
-        let preferredExampleH: CGFloat = 70
-        let available = max(0, y - bottomPad)
-
-        let canShowExample = available >= (minPromptH + spacing + preferredExampleH)
-        let exampleH: CGFloat = canShowExample ? preferredExampleH : 0
-        let promptH = max(minPromptH, available - (canShowExample ? (spacing + exampleH) : 0))
-
-        promptBox.frame = NSRect(x: pad, y: max(bottomPad, y - promptH), width: contentW, height: promptH)
-        if let cv = promptBox.contentView {
-            let inset: CGFloat = 10
-            openPromptEditorButton.sizeToFit()
-            openPromptEditorButton.frame = NSRect(
-                x: inset,
-                y: cv.bounds.height - 24,
-                width: openPromptEditorButton.frame.width,
-                height: 18
-            )
-
-            resetPromptButton.sizeToFit()
-            resetPromptButton.frame = NSRect(
-                x: cv.bounds.width - inset - resetPromptButton.frame.width,
-                y: cv.bounds.height - 24,
-                width: resetPromptButton.frame.width,
-                height: 18
-            )
-            promptScrollView.frame = NSRect(
-                x: inset,
-                y: 10,
-                width: cv.bounds.width - inset * 2,
-                height: max(40, cv.bounds.height - 40)
-            )
-            promptTextView.frame = promptScrollView.bounds
-        }
-
-        if canShowExample {
-            exampleBox.isHidden = false
-            exampleBox.frame = NSRect(x: pad, y: bottomPad, width: contentW, height: exampleH)
-            if let cv = exampleBox.contentView {
-                exampleLabel.frame = cv.bounds.insetBy(dx: 12, dy: 4)
-            }
-        } else {
-            exampleBox.isHidden = true
-        }
+    /// Shows/hides the download progress strip *and* collapses its height, so
+    /// an idle pane has no dead space between the model card and the prompt.
+    private func setProgressVisible(_ visible: Bool) {
+        progressContainer.isHidden = !visible
+        progressHeight.constant = visible ? 38 : 0
     }
-    
+
     func textDidChange(_ notification: Notification) {
         CleanupSettings.prompt = promptTextView.string
     }

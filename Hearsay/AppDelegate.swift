@@ -185,6 +185,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.clearDiagnosticLogs()
         }
         
+        statusBar.onModelNameChanged = { [weak self] name in
+            self?.settingsWindowController?.updateFooter(
+                text: name ?? "No model",
+                enabled: name != nil
+            )
+        }
+
         statusBar.onQuit = {
             NSApp.terminate(nil)
         }
@@ -1452,6 +1459,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.cleanupManager.unloadModel()
             }
         }
+        // Seed the sidebar footer with the current model.
+        controller.updateFooter(
+            text: statusBar.modelName ?? "No model",
+            enabled: statusBar.modelName != nil
+        )
         settingsWindowController = controller
         return controller
     }
