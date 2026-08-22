@@ -34,3 +34,11 @@ Hearsay.xcodeproj/
 dist/
 package-lock.json
 .dev/
+
+# Local analysis tool output
+.diffgraph/
+.diffsummary/
+.semanticdiff/
+
+# Coverage artifacts
+*.profraw
