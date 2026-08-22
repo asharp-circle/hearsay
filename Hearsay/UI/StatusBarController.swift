@@ -1,7 +1,7 @@
 import AppKit
 
 /// Manages the menu bar status item and dropdown menu.
-final class StatusBarController {
+final class StatusBarController: NSObject, NSMenuDelegate {
     
     private var statusItem: NSStatusItem!
     private var menu: NSMenu!
@@ -11,6 +11,16 @@ final class StatusBarController {
     private var modelItem: NSMenuItem!
     private var historySubmenu: NSMenu!
     private var historyMenuItem: NSMenuItem!
+
+    /// Anchor the inline "Recent" section is rebuilt around, plus the rows we
+    /// currently own so they can be swapped out without rebuilding the menu.
+    private var recentHeaderItem: NSMenuItem!
+    private var inlineHistoryItems: [NSMenuItem] = []
+
+    /// How many transcriptions render inline in the dropdown itself.
+    private let inlineHistoryCount = 4
+    /// How many *more* are reachable by hovering the "Older" submenu.
+    private let submenuHistoryCount = 20
     
     var onToggleEnabled: ((Bool) -> Void)?
     var onShowHistory: (() -> Void)?
@@ -25,16 +35,20 @@ final class StatusBarController {
     var onClearDiagnosticLogs: (() -> Void)?
     var onCopyHistoryItem: ((TranscriptionItem) -> Void)?
     var onQuit: (() -> Void)?
+    /// Mirrors the active model name so other chrome (e.g. the window's sidebar
+    /// footer) can show the same status without re-deriving it.
+    var onModelNameChanged: ((String?) -> Void)?
     
     private(set) var isEnabled = true
     
-    init() {
+    override init() {
+        super.init()
         setupStatusItem()
         setupMenu()
         
         // Listen for history changes
         HistoryStore.shared.addChangeObserver { [weak self] in
-            self?.updateHistorySubmenu()
+            self?.refreshHistorySections()
         }
     }
     
@@ -99,8 +113,15 @@ final class StatusBarController {
         
         menu.addItem(.separator())
         
-        // History submenu
-        historyMenuItem = NSMenuItem(title: "Recent", action: nil, keyEquivalent: "")
+        // Inline "Recent" section — the newest few transcriptions render as
+        // custom rows directly in the dropdown (no hovering required).
+        recentHeaderItem = NSMenuItem()
+        recentHeaderItem.isEnabled = false
+        recentHeaderItem.view = MenuSectionHeaderView(title: "Recent")
+        menu.addItem(recentHeaderItem)
+
+        // Everything older stays behind a hover submenu.
+        historyMenuItem = NSMenuItem(title: "Older", action: nil, keyEquivalent: "")
         historySubmenu = NSMenu()
         historyMenuItem.submenu = historySubmenu
         menu.addItem(historyMenuItem)
@@ -172,44 +193,99 @@ final class StatusBarController {
         quitItem.isEnabled = true
         menu.addItem(quitItem)
         
+        menu.delegate = self
         statusItem.menu = menu
         
         // Initial history update
-        updateHistorySubmenu()
+        refreshHistorySections()
+    }
+
+    // MARK: - History sections
+
+    /// Rebuilds both the inline rows and the "Older" hover submenu.
+    private func refreshHistorySections() {
+        let recent = HistoryStore.shared.getRecent(inlineHistoryCount + submenuHistoryCount)
+        updateInlineHistory(Array(recent.prefix(inlineHistoryCount)))
+        updateHistorySubmenu(Array(recent.dropFirst(inlineHistoryCount)))
+    }
+
+    private func updateInlineHistory(_ items: [TranscriptionItem]) {
+        // Drop the rows we inserted last time.
+        for item in inlineHistoryItems where menu.index(of: item) >= 0 {
+            menu.removeItem(item)
+        }
+        inlineHistoryItems.removeAll()
+
+        guard let anchor = recentHeaderItem, menu.index(of: anchor) >= 0 else { return }
+        var insertIndex = menu.index(of: anchor) + 1
+
+        if items.isEmpty {
+            let empty = NSMenuItem()
+            empty.isEnabled = false
+            empty.view = MenuEmptyStateView(message: "No transcriptions yet")
+            menu.insertItem(empty, at: insertIndex)
+            inlineHistoryItems.append(empty)
+            return
+        }
+
+        for (index, item) in items.enumerated() {
+            let menuItem = NSMenuItem()
+            // ⌘1…⌘4 still work even though the row draws itself.
+            menuItem.keyEquivalent = "\(index + 1)"
+            menuItem.keyEquivalentModifierMask = [.command]
+            menuItem.action = #selector(copyHistoryItem(_:))
+            menuItem.target = self
+            menuItem.representedObject = item
+            menuItem.view = MenuHistoryRowView(item: item) { [weak self] selected in
+                self?.onCopyHistoryItem?(selected)
+            }
+            menu.insertItem(menuItem, at: insertIndex)
+            inlineHistoryItems.append(menuItem)
+            insertIndex += 1
+        }
     }
     
-    private func updateHistorySubmenu() {
+    private func updateHistorySubmenu(_ items: [TranscriptionItem]) {
         historySubmenu.removeAllItems()
-        
-        let recentItems = HistoryStore.shared.getRecent(10)
-        
-        if recentItems.isEmpty {
-            let emptyItem = NSMenuItem(title: "No transcriptions yet", action: nil, keyEquivalent: "")
-            emptyItem.isEnabled = false
-            historySubmenu.addItem(emptyItem)
-        } else {
-            for (index, item) in recentItems.enumerated() {
-                let menuItem = NSMenuItem(
-                    title: item.menuTitle,
-                    action: #selector(copyHistoryItem(_:)),
-                    keyEquivalent: index < 9 ? "\(index + 1)" : ""
-                )
-                menuItem.target = self
-                menuItem.representedObject = item
-                menuItem.toolTip = "\(item.formattedTime)\n\n\(item.text)"
-                historySubmenu.addItem(menuItem)
-            }
+
+        historyMenuItem.isHidden = items.isEmpty
+        guard !items.isEmpty else { return }
+
+        historyMenuItem.title = "Older (\(items.count))"
+
+        for item in items {
+            let menuItem = NSMenuItem(
+                title: item.menuTitle,
+                action: #selector(copyHistoryItem(_:)),
+                keyEquivalent: ""
+            )
+            menuItem.target = self
+            menuItem.representedObject = item
+            menuItem.toolTip = "\(item.formattedTime)\n\n\(item.text)"
+            historySubmenu.addItem(menuItem)
         }
+    }
+
+    // MARK: - NSMenuDelegate
+
+    /// Relative timestamps go stale between openings, so rebuild on every open.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        refreshHistorySections()
     }
     
     // MARK: - Public
     
+    private(set) var modelName: String?
+
     func updateModelName(_ name: String?) {
+        modelName = name
         if let name = name {
             modelItem.title = "Model: \(name)"
         } else {
             modelItem.title = "Model: Not installed"
         }
+        onModelNameChanged?(name)
     }
     
     func setEnabled(_ enabled: Bool) {
