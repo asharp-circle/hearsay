@@ -16,14 +16,16 @@ brew install --cask swairshah/tap/hearsay
 
 ## How to use
 
-| Action | How |
+| Action | Default shortcut |
 |--------|-----|
 | **Record** | Hold **Right Option (⌥)** and speak |
 | **Transcribe** | Release the key — text is pasted at your cursor |
-| **Hands-free mode** | **Right Option + Space** to start, **Space** or **Esc** to stop |
+| **Hands-free mode** | **⌥Space** to toggle recording, **Space** or **Esc** to stop |
 | **Screenshot while recording** | **⌥4** to select a region, **⌥3** for the full screen — images are referenced in your transcript |
 
-Transcribed text is pasted at your cursor and copied to the clipboard.
+All shortcuts (and the Hold vs. Toggle activation style) are customizable in **Settings → Keyboard Shortcuts**.
+
+Transcribed text is pasted at your cursor and copied to the clipboard — both behaviors can be toggled in Settings.
 
 Every transcription is saved locally in **History** — find recent ones in the menu bar dropdown, or open the Hearsay window and click any line to copy it again. If a transcription ever fails, the audio is kept and you can retry it from History with one click.
 
@@ -36,7 +38,19 @@ Every transcription is saved locally in **History** — find recent ones in the 
    - **Qwen** — fast and high-quality, works on all Macs including Intel
    - **Whisper** — English transcription (Apple Silicon)
 
-You can download, switch between, and delete models anytime in **Settings → Models**. Shortcuts, cleanup rules, and more are configurable in Settings too.
+You can download, switch between, and delete models anytime from the **Models** tab.
+
+## The Hearsay window
+
+Everything lives in one window with a sidebar:
+
+- **Settings** — clipboard/paste behavior, sound effects, dock icon, history size, and keyboard shortcuts
+- **Models** — download, activate, and delete speech models: Qwen Fast (0.6B) / Quality (1.7B), Whisper tiny.en / small.en, Parakeet English (v2) / Multilingual (v3)
+- **Microphone** — pick your input device
+- **Replacements** — automatic text substitutions applied to transcripts
+- **Cleanup** & **Post Processing** — rules and LLM-powered polishing for transcribed text
+- **History** — every transcription, click a line to copy it, retry failed ones
+- **Permissions** — check and fix Microphone/Accessibility access
 
 ## Requirements
 
