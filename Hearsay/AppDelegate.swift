@@ -328,6 +328,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                        FileManager.default.fileExists(atPath: "/Users/swair/work/misc/qwen-asr/qwen3-asr-0.6b")
         
         if !micGranted || !accessGranted || !hasModel {
+            if !accessGranted {
+                PermissionsManager.requestAccessibility()
+            }
             // Show onboarding for permissions and/or model download
             showOnboardingForSetup()
             
