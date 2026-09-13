@@ -95,6 +95,11 @@ xcodebuild -project Hearsay.xcodeproj \
     -skipMacroValidation \
     build ARCHS=arm64 ONLY_ACTIVE_ARCH=NO
 
+SIGN_IDENTITY="-"
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "Hearsay Dev"; then
+    SIGN_IDENTITY="Hearsay Dev"
+fi
+
 BUILT_APP="build/Build/Products/Release/$APP_NAME.app"
 BUILT_HELPER="build/Build/Products/Release/HearsayParakeetHelper"
 BUILT_CLI="build/Build/Products/Release/hearsay"
@@ -109,7 +114,7 @@ if [ -f "$BUILT_HELPER" ]; then
     mkdir -p "$BUILT_APP/Contents/MacOS"
     cp "$BUILT_HELPER" "$BUILT_APP/Contents/MacOS/HearsayParakeetHelper"
     chmod 755 "$BUILT_APP/Contents/MacOS/HearsayParakeetHelper"
-    codesign --force --sign - "$BUILT_APP/Contents/MacOS/HearsayParakeetHelper"
+    codesign --force --sign "$SIGN_IDENTITY" "$BUILT_APP/Contents/MacOS/HearsayParakeetHelper"
 fi
 
 # Bundle CLI into app Resources
@@ -117,23 +122,23 @@ if [ -f "$BUILT_CLI" ]; then
     mkdir -p "$BUILT_APP/Contents/Resources"
     cp "$BUILT_CLI" "$BUILT_APP/Contents/Resources/hearsay"
     chmod 755 "$BUILT_APP/Contents/Resources/hearsay"
-    codesign --force --sign - "$BUILT_APP/Contents/Resources/hearsay"
+    codesign --force --sign "$SIGN_IDENTITY" "$BUILT_APP/Contents/Resources/hearsay"
 fi
 
 # Bundle qwen_asr if available
 if [ -f "$QWEN_BACKUP" ]; then
     cp "$QWEN_BACKUP" "$BUILT_APP/Contents/MacOS/qwen_asr"
     chmod 755 "$BUILT_APP/Contents/MacOS/qwen_asr"
-    codesign --force --sign - "$BUILT_APP/Contents/MacOS/qwen_asr"
+    codesign --force --sign "$SIGN_IDENTITY" "$BUILT_APP/Contents/MacOS/qwen_asr"
 elif [ -f "$HOME/work/misc/qwen-asr/qwen_asr" ]; then
     cp "$HOME/work/misc/qwen-asr/qwen_asr" "$BUILT_APP/Contents/MacOS/qwen_asr"
     chmod 755 "$BUILT_APP/Contents/MacOS/qwen_asr"
-    codesign --force --sign - "$BUILT_APP/Contents/MacOS/qwen_asr"
+    codesign --force --sign "$SIGN_IDENTITY" "$BUILT_APP/Contents/MacOS/qwen_asr"
 fi
 
 # Sign the overall bundle
-echo -e "${YELLOW}Codesigning Hearsay.app...${NC}"
-codesign --force --sign - --entitlements Hearsay/Hearsay.entitlements "$BUILT_APP"
+echo -e "${YELLOW}Codesigning Hearsay.app with '$SIGN_IDENTITY'...${NC}"
+codesign --force --sign "$SIGN_IDENTITY" --entitlements Hearsay/Hearsay.entitlements "$BUILT_APP"
 
 # Install into ~/Applications
 echo -e "${YELLOW}Installing to $TARGET_APP...${NC}"
