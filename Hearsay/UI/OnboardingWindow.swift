@@ -152,7 +152,10 @@ private class PermissionsContentView: NSView {
             description: "Handles hotkeys and pasting text",
             buttonTitle: "Open Settings",
             onAction: {
-                PermissionsManager.openAccessibilitySettings()
+                PermissionsManager.requestAccessibility()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    PermissionsManager.openAccessibilitySettings()
+                }
             }
         )
         
