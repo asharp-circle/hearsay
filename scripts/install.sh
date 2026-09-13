@@ -11,6 +11,7 @@ cd "$REPO_ROOT"
 APP_NAME="Hearsay"
 APP_DIR="$HOME/Applications"
 TARGET_APP="$APP_DIR/$APP_NAME.app"
+DERIVED_DATA_DIR="build.noindex"
 BIN_LINK="/opt/homebrew/bin/hearsay"
 ALT_BIN_LINK="$HOME/.local/bin/hearsay"
 QWEN_BACKUP="$HOME/.local/share/hearsay/qwen_asr"
@@ -70,7 +71,7 @@ echo -e "${YELLOW}Building HearsayParakeetHelper...${NC}"
 xcodebuild -project Hearsay.xcodeproj \
     -scheme HearsayParakeetHelper \
     -configuration Release \
-    -derivedDataPath build \
+    -derivedDataPath "$DERIVED_DATA_DIR" \
     -destination 'platform=macOS,arch=arm64' \
     -skipMacroValidation \
     build ARCHS=arm64 ONLY_ACTIVE_ARCH=NO
@@ -80,7 +81,7 @@ echo -e "${YELLOW}Building HearsayCLI...${NC}"
 xcodebuild -project Hearsay.xcodeproj \
     -scheme HearsayCLI \
     -configuration Release \
-    -derivedDataPath build \
+    -derivedDataPath "$DERIVED_DATA_DIR" \
     -destination 'platform=macOS,arch=arm64' \
     -skipMacroValidation \
     build ARCHS=arm64 ONLY_ACTIVE_ARCH=NO
@@ -90,7 +91,7 @@ echo -e "${YELLOW}Building Hearsay.app...${NC}"
 xcodebuild -project Hearsay.xcodeproj \
     -scheme Hearsay \
     -configuration Release \
-    -derivedDataPath build \
+    -derivedDataPath "$DERIVED_DATA_DIR" \
     -destination 'platform=macOS,arch=arm64' \
     -skipMacroValidation \
     build ARCHS=arm64 ONLY_ACTIVE_ARCH=NO
@@ -100,9 +101,9 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "Hearsay Dev";
     SIGN_IDENTITY="Hearsay Dev"
 fi
 
-BUILT_APP="build/Build/Products/Release/$APP_NAME.app"
-BUILT_HELPER="build/Build/Products/Release/HearsayParakeetHelper"
-BUILT_CLI="build/Build/Products/Release/hearsay"
+BUILT_APP="$DERIVED_DATA_DIR/Build/Products/Release/$APP_NAME.app"
+BUILT_HELPER="$DERIVED_DATA_DIR/Build/Products/Release/HearsayParakeetHelper"
+BUILT_CLI="$DERIVED_DATA_DIR/Build/Products/Release/hearsay"
 
 if [ ! -d "$BUILT_APP" ]; then
     echo -e "${RED}Error: Build output not found at $BUILT_APP${NC}"
@@ -145,6 +146,7 @@ echo -e "${YELLOW}Installing to $TARGET_APP...${NC}"
 mkdir -p "$APP_DIR"
 rm -rf "$TARGET_APP"
 cp -R "$BUILT_APP" "$TARGET_APP"
+rm -rf "$BUILT_APP"
 
 # Create symlink for CLI
 INSTALLED_CLI="$TARGET_APP/Contents/Resources/hearsay"
