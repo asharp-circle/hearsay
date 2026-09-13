@@ -22,13 +22,13 @@ for arg in "$@"; do
             LAUNCH=true
             ;;
         --help|-h)
-            echo "Usage: ./scripts/install.sh [--launch]"
+            echo "Usage: ./install.sh [--launch]"
             echo "Builds Hearsay from source and installs it into ~/Applications with CLI symlink."
             exit 0
             ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: ./scripts/install.sh [--launch]"
+            echo "Usage: ./install.sh [--launch]"
             exit 1
             ;;
     esac
@@ -59,13 +59,10 @@ if [ ! -d "Hearsay.xcodeproj" ] || [ "project.yml" -nt "Hearsay.xcodeproj" ]; th
     xcodegen generate
 fi
 
-# Verify xcodebuild works
-if ! xcodebuild -checkFirstLaunchStatus 2>/dev/null; then
-    if ! xcodebuild -version &>/dev/null; then
-        echo -e "${RED}Error: xcodebuild is failing to load plugins.${NC}"
-        echo -e "${YELLOW}Please run: sudo xcodebuild -runFirstLaunch${NC}"
-        exit 1
-    fi
+# Check xcodebuild
+if ! xcodebuild -version &>/dev/null; then
+    echo -e "${RED}Error: xcodebuild is not functional.${NC}"
+    exit 1
 fi
 
 # Build Parakeet Helper
