@@ -28,7 +28,8 @@ private struct Command {
         case "open":
             try runProcess("/usr/bin/open", ["-a", "Hearsay"])
         case "quit", "close":
-            try runProcess("/usr/bin/osascript", ["-e", "tell application id \"com.swair.hearsay\" to quit"])
+            _ = try? runProcess("/usr/bin/osascript", ["-e", "tell application id \"com.andrewsharp.hearsay\" to quit"])
+            _ = try? runProcess("/usr/bin/osascript", ["-e", "tell application id \"com.swair.hearsay\" to quit"])
         case "dictate":
             try await dictate(rest)
         case "stop":
