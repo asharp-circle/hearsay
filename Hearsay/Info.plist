@@ -11,7 +11,7 @@
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.swair.hearsay</string>
+	<string>com.andrewsharp.hearsay</string>
 	<key>CFBundleName</key>
 	<string>Hearsay</string>
 	<key>CFBundlePackageType</key>
