@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import AppKit
 import os.log
 
 private let apiLogger = Logger(subsystem: "com.swair.hearsay", category: "local-api")
@@ -9,6 +10,7 @@ protocol HearsayLocalAPIServerDelegate: AnyObject {
     @MainActor func startCallerDictation(request: DictationRequest) throws
     @MainActor func stopCallerDictation(requestId: UUID) throws
     @MainActor func cancelCallerDictation(requestId: UUID) throws
+    @MainActor func reloadHotkeys()
 }
 
 final class HearsayLocalAPIServer {
@@ -154,6 +156,16 @@ final class HearsayLocalAPIServer {
             return
         }
 
+        if request.method == "GET", components == ["v1", "hotkeys"] {
+            handleGetHotkeys(on: connection)
+            return
+        }
+
+        if request.method == "POST", components == ["v1", "hotkeys", "update"] {
+            handleUpdateHotkeys(request, on: connection)
+            return
+        }
+
         if request.method == "POST", components == ["v1", "dictations"] {
             handleStart(request, on: connection)
             return
@@ -285,6 +297,123 @@ final class HearsayLocalAPIServer {
             }
             sendJSON(connection, status: 200, object: resp)
         }
+    }
+
+    private func handleGetHotkeys(on connection: NWConnection) {
+        Task { @MainActor in
+            let modeRaw = UserDefaults.standard.integer(forKey: "activationMode")
+            let modeStr = (modeRaw == 1) ? "doubleTap" : "hold"
+            let holdKeyCode = UserDefaults.standard.object(forKey: "holdKeyCode") as? Int ?? 61
+            let toggleKeyCode = UserDefaults.standard.object(forKey: "toggleStartKeyCode") as? Int ?? 49
+            let toggleModifiers = UserDefaults.standard.object(forKey: "toggleStartModifiers") as? Int ?? Int(CGEventFlags.maskAlternate.rawValue)
+
+            let screenshotKeyCode = UserDefaults.standard.object(forKey: "screenshotKeyCode") as? Int ?? 21
+            let screenshotModifiers = UserDefaults.standard.object(forKey: "screenshotModifiers") as? Int ?? Int(CGEventFlags.maskAlternate.rawValue)
+
+            let fullScreenshotKeyCode = UserDefaults.standard.object(forKey: "fullScreenshotKeyCode") as? Int ?? 20
+            let fullScreenshotModifiers = UserDefaults.standard.object(forKey: "fullScreenshotModifiers") as? Int ?? Int(CGEventFlags.maskAlternate.rawValue)
+
+            let resp: [String: Any] = [
+                "activationMode": modeStr,
+                "holdKey": [
+                    "keyCode": holdKeyCode,
+                    "name": keyName(for: holdKeyCode)
+                ],
+                "toggleCombo": [
+                    "keyCode": toggleKeyCode,
+                    "modifiers": toggleModifiers,
+                    "enabled": toggleKeyCode != 0,
+                    "display": displayCombo(keyCode: toggleKeyCode, modifiers: UInt(toggleModifiers))
+                ],
+                "screenshotCombo": [
+                    "keyCode": screenshotKeyCode,
+                    "modifiers": screenshotModifiers,
+                    "enabled": screenshotKeyCode != 0,
+                    "display": displayCombo(keyCode: screenshotKeyCode, modifiers: UInt(screenshotModifiers))
+                ],
+                "fullScreenshotCombo": [
+                    "keyCode": fullScreenshotKeyCode,
+                    "modifiers": fullScreenshotModifiers,
+                    "enabled": fullScreenshotKeyCode != 0,
+                    "display": displayCombo(keyCode: fullScreenshotKeyCode, modifiers: UInt(fullScreenshotModifiers))
+                ]
+            ]
+            sendJSON(connection, status: 200, object: resp)
+        }
+    }
+
+    private struct UpdateHotkeysPayload: Decodable {
+        let mode: String?
+        let holdKeyCode: Int?
+        let toggleKeyCode: Int?
+        let toggleModifiers: Int?
+        let reset: Bool?
+    }
+
+    private func handleUpdateHotkeys(_ request: HTTPRequest, on connection: NWConnection) {
+        let payload: UpdateHotkeysPayload
+        do {
+            payload = try JSONDecoder().decode(UpdateHotkeysPayload.self, from: request.body)
+        } catch {
+            sendError(connection, status: 400, code: "invalid_request", message: "Request body must be valid JSON")
+            return
+        }
+
+        Task { @MainActor in
+            if payload.reset == true {
+                UserDefaults.standard.set(0, forKey: "activationMode")
+                UserDefaults.standard.set(61, forKey: "holdKeyCode")
+                UserDefaults.standard.set(49, forKey: "toggleStartKeyCode")
+                UserDefaults.standard.set(Int(CGEventFlags.maskAlternate.rawValue), forKey: "toggleStartModifiers")
+            } else {
+                if let mode = payload.mode {
+                    let modeVal = (mode.lowercased() == "doubletap" || mode.lowercased() == "double-tap") ? 1 : 0
+                    UserDefaults.standard.set(modeVal, forKey: "activationMode")
+                }
+                if let holdCode = payload.holdKeyCode {
+                    UserDefaults.standard.set(holdCode, forKey: "holdKeyCode")
+                }
+                if let toggleCode = payload.toggleKeyCode {
+                    UserDefaults.standard.set(toggleCode, forKey: "toggleStartKeyCode")
+                }
+                if let toggleMods = payload.toggleModifiers {
+                    UserDefaults.standard.set(toggleMods, forKey: "toggleStartModifiers")
+                }
+            }
+
+            delegate?.reloadHotkeys()
+            handleGetHotkeys(on: connection)
+        }
+    }
+
+    private func keyName(for keyCode: Int) -> String {
+        let names: [Int: String] = [
+            54: "Right ⌘", 55: "Left ⌘", 56: "Left ⇧", 57: "⇪", 58: "Left ⌥", 59: "Left ⌃",
+            60: "Right ⇧", 61: "Right ⌥", 62: "Right ⌃", 63: "fn",
+            36: "↩", 48: "⇥", 49: "Space", 51: "⌫", 53: "⎋", 76: "⌤",
+            123: "←", 124: "→", 125: "↓", 126: "↑",
+            122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6",
+            98: "F7", 100: "F8", 101: "F9", 109: "F10", 103: "F11", 111: "F12",
+            0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
+            8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R", 16: "Y",
+            17: "T", 18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5", 24: "=",
+            25: "9", 26: "7", 27: "-", 28: "8", 29: "0", 30: "]", 31: "O", 32: "U",
+            33: "[", 34: "I", 35: "P", 37: "L", 38: "J", 39: "'", 40: "K", 41: ";",
+            42: "\\", 43: ",", 44: "/", 45: "N", 46: "M", 47: ".", 50: "`"
+        ]
+        return names[keyCode] ?? "Key \(keyCode)"
+    }
+
+    private func displayCombo(keyCode: Int, modifiers: UInt) -> String {
+        guard keyCode != 0 else { return "Disabled" }
+        var parts: [String] = []
+        let flags = NSEvent.ModifierFlags(rawValue: modifiers)
+        if flags.contains(.control) { parts.append("⌃") }
+        if flags.contains(.option) { parts.append("⌥") }
+        if flags.contains(.shift) { parts.append("⇧") }
+        if flags.contains(.command) { parts.append("⌘") }
+        parts.append(keyName(for: keyCode))
+        return parts.joined()
     }
 
     private func handleStart(_ request: HTTPRequest, on connection: NWConnection) {

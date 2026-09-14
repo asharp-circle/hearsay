@@ -1558,4 +1558,9 @@ extension AppDelegate: HearsayLocalAPIServerDelegate {
             "request_id": String(requestId.uuidString.prefix(8))
         ])
     }
+
+    @MainActor
+    func reloadHotkeys() {
+        hotkeyMonitor.loadSettings()
+    }
 }
